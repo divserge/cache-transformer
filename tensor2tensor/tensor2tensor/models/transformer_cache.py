@@ -45,6 +45,7 @@ import tensorflow as tf
 
 from tensorflow.python.util import nest
 import numpy as np
+from lru_cache import LRUCache as LRUCache_new
 
 
 def features_to_nonpadding(features, inputs_or_targets="inputs"):
@@ -126,7 +127,7 @@ class TransformerCache(Transformer):
   def __init__(self, *args, **kwargs):
     super(TransformerCache, self).__init__(*args, **kwargs)
     self.attention_weights = dict()  # For vizualizing attention heads.
-    self.sentence_cache = LRUCache(20)
+    self.sentence_cache = LRUCache_new(self.hparams.hidden_size, max_size=5, batch_size=self.hparams.batch_size)
 
     with tf.variable_scope("sentence_level_cache"):
       self.m_weight = tf.get_variable(
@@ -193,7 +194,8 @@ class TransformerCache(Transformer):
       return decoder_output
     else:
       # Expand since t2t expects 4d tensors.
-      m = tf.py_func(self.sentence_cache.QueryMultipleEntries, [decoder_output], tf.float32)
+      m = self.sentence_cache.Query(decoder_output)
+      #m = tf.py_func(self.sentence_cache.QueryMultipleEntries, [decoder_output], tf.float32)
       m.set_shape(decoder_output.get_shape())
       lambd = self.calculate_mixing_weight(decoder_output, m)
       return tf.expand_dims(lambd * decoder_output + (1.0 - lambd) * m, axis=2)
@@ -236,14 +238,13 @@ class TransformerCache(Transformer):
         nonpadding=features_to_nonpadding(features, "targets")
     )
 
-    self.cache_flag = tf.py_func(
-      self.sentence_cache.AddMultipleEntries,
-      [features["targets_raw"], decoder_output],
-      tf.int64,
+    self.cache_flag = self.sentence_cache.Add(
+      tf.squeeze(features["targets_raw"], [2, 3]),
+      tf.squeeze(decoder_output, 2),
+      tf.squeeze(decoder_output, 2)
     )
 
     tf.cast(self.cache_flag, tf.float32)
-
 
     expected_attentions = features.get("expected_attentions")
     if expected_attentions is not None:
@@ -252,8 +253,8 @@ class TransformerCache(Transformer):
           hparams.expected_attention_loss_type,
           hparams.expected_attention_loss_multiplier)
       return decoder_output, {"attention_loss": attention_loss}
-    self.cache_flag.set_shape((1,))
-    return decoder_output + 0 * self.cache_flag
+
+    return decoder_output + self.cache_flag
 
 
   def _fast_decode(self,
@@ -514,7 +515,7 @@ def fast_decode(encoder_output,
       finished |= tf.equal(next_id, eos_id)
       next_id = tf.expand_dims(next_id, axis=1)
       
-      cache_flag = tf.py_func(sentence_cache.AddMultipleEntries, [next_id, out], tf.int64)
+      cache_flag = sentence_cache.Add(next_id, out, out)
       cache_flag.set_shape(tf.TensorShape([]))
       
       decoded_ids = tf.concat([decoded_ids, next_id], axis=1)

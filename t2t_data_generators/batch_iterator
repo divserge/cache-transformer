@@ -1,0 +1,21 @@
+from itertools import zip_longest
+
+def box_hpaulj(LoL):
+    return np.array(list(zip_longest(*LoL, fillvalue=0)), dtype=np.int32).T
+
+def batch_iterator(data, batch_size, context_size, n_steps=1000):
+    
+    for k in range(n_steps):
+        
+        batch_list_inp = [[] for _ in range(context_size)]
+        batch_list_targ = [[] for _ in range(context_size)]
+
+        for batch_i in range(batch_size):
+            for context_i, p in enumerate(data):
+                batch_list_inp[context_i].append(p['inputs'])
+                batch_list_targ[context_i].append(p['targets'])
+                if context_i == context_size - 1:
+                    break
+
+        for b_inp, b_out in zip(batch_list_inp, batch_list_targ):
+            yield {'inputs' : box_hpaulj(b_inp), 'targets' : box_hpaulj(b_out)}
