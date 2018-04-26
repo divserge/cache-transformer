@@ -46,7 +46,7 @@ class LRUCache:
         alphas.set_shape((state_vectors.shape[0] * state_vectors.shape[1],))
 
         updates = tf.multiply(alphas[:, None], tf.gather_nd(self.state_tensor_, indices)) + \
-            tf.multiply(1 - alphas[:, None], tf.reshape(state_vectors, (-1, state_vectors.shape[-1])))
+            tf.multiply(1 - alphas[:, None], tf.reshape(state_vectors, (-1, tf.shape(state_vectors)[-1])))
 
         self.state_tensor_ = tf.scatter_nd_update(
             self.state_tensor_,

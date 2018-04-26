@@ -35,7 +35,7 @@ from tensor2tensor.data_generators import librispeech
 from tensor2tensor.layers import common_attention
 from tensor2tensor.layers import common_hparams
 from tensor2tensor.layers import common_layers
-from tensor2tensor.utils import beam_search
+import beam_search_states as beam_search
 from tensor2tensor.utils import expert_utils
 from tensor2tensor.utils import registry
 from tensor2tensor.utils import t2t_model
@@ -60,7 +60,7 @@ class TransformerCache(Transformer):
   def __init__(self, *args, **kwargs):
     super(TransformerCache, self).__init__(*args, **kwargs)
     self.attention_weights = dict()  # For vizualizing attention heads.
-    self.sentence_cache = LRUCache_new(self.hparams.hidden_size, max_size=5, batch_size=self.hparams.batch_size)
+    self.sentence_cache = LRUCache_new(self.hparams.hidden_size, max_size=20, batch_size=self.hparams.batch_size)
 
     with tf.variable_scope("sentence_level_cache"):
       self.m_weight = tf.get_variable(
@@ -127,11 +127,30 @@ class TransformerCache(Transformer):
       return decoder_output
     else:
       # Expand since t2t expects 4d tensors.
-      m = self.sentence_cache.Query(decoder_output)
+
+      m = self.sentence_cache.Query(
+        tf.reshape(
+          decoder_output,
+          [hparams.batch_size, -1, hparams.hidden_size]
+        )
+      )
       #m = tf.py_func(self.sentence_cache.QueryMultipleEntries, [decoder_output], tf.float32)
-      m.set_shape(decoder_output.get_shape())
-      lambd = self.calculate_mixing_weight(decoder_output, m)
-      return tf.expand_dims(lambd * decoder_output + (1.0 - lambd) * m, axis=2)
+      
+      lambd = self.calculate_mixing_weight(
+          tf.reshape(
+              decoder_output,
+              [hparams.batch_size, -1, hparams.hidden_size]
+          ), m
+      )
+
+      m = tf.reshape(m, tf.shape(decoder_output))
+      
+      lambd = tf.reshape(lambd, (tf.shape(decoder_output)[0], -1, hparams.hidden_size))
+      
+      if self.hparams.use_cache:
+        return tf.expand_dims(lambd * decoder_output + (1.0 - lambd) * m, axis=2)
+      else:
+        return tf.expand_dims(decoder_output, axis=2)
 
   def body(self, features):
     """Transformer main model_fn.
@@ -306,6 +325,7 @@ class TransformerCache(Transformer):
 
     def symbols_to_logits_fn(ids, i, cache):
       """Go from ids to logits for next symbol."""
+      print(i)
       ids = ids[:, -1:]
       targets = tf.expand_dims(tf.expand_dims(ids, axis=2), axis=3)
       targets = preprocess_targets(targets, i)
@@ -416,14 +436,17 @@ def fast_decode(encoder_output,
       for layer in range(num_layers)
   }
 
+
+  cache["state"] = tf.zeros([batch_size, hparams.hidden_size])
+
   if encoder_output is not None:
     cache["encoder_output"] = encoder_output
     cache["encoder_decoder_attention_bias"] = encoder_decoder_attention_bias
 
-  if beam_size > 1:  # Beam Search
+  if beam_size >= 1:  # Beam Search
     initial_ids = tf.zeros([batch_size], dtype=tf.int32)
-    decoded_ids, scores = beam_search.beam_search(
-        lambda x : symbols_to_logits_fn(x)[:-1],
+    decoded_ids, scores, states = beam_search.beam_search(
+        lambda x, y, z : symbols_to_logits_fn(x, y, z)[:-1],
         initial_ids,
         beam_size,
         decode_length,
@@ -434,44 +457,14 @@ def fast_decode(encoder_output,
         stop_early=(top_beams == 1))
 
     if top_beams == 1:
+      print("KEK")
       decoded_ids = decoded_ids[:, 0, 1:]
+      states = states[:, 0, 1:, :]
     else:
       decoded_ids = decoded_ids[:, :top_beams, 1:]
-  else:  # Greedy
+  else:
+    raise ValueError('greedy is not supported')
 
-    def inner_loop(cache_flag, i, finished, next_id, decoded_ids, cache):
-      """One step of greedy decoding."""
-      logits, cache, out = symbols_to_logits_fn(next_id, i, cache)
-      temperature = (0.0 if hparams.sampling_method == "argmax" else
-                     hparams.sampling_temp)
-      next_id = common_layers.sample_with_temperature(logits, temperature)
-      finished |= tf.equal(next_id, eos_id)
-      next_id = tf.expand_dims(next_id, axis=1)
-      
-      cache_flag = sentence_cache.Add(next_id, out, out)
-      cache_flag.set_shape(tf.TensorShape([]))
-      
-      decoded_ids = tf.concat([decoded_ids, next_id], axis=1)
-      return cache_flag, i + 1, finished, next_id, decoded_ids, cache
+  cache_flag = sentence_cache.Add(decoded_ids, states, states)
 
-    def is_not_finished(cache_flag, i, finished, *_):
-      return (i < decode_length) & tf.logical_not(tf.reduce_all(finished))
-
-    decoded_ids = tf.zeros([batch_size, 0], dtype=tf.int64)
-    finished = tf.fill([batch_size], False)
-    next_id = tf.zeros([batch_size, 1], dtype=tf.int64)
-    cache_flag, _, _, _, decoded_ids, _ = tf.while_loop(
-        is_not_finished,
-        inner_loop,
-        [cache_flag, tf.constant(0), finished, next_id, decoded_ids, cache],
-        shape_invariants=[
-            tf.TensorShape([]),
-            tf.TensorShape([]),
-            tf.TensorShape([None]),
-            tf.TensorShape([None, None]),
-            tf.TensorShape([None, None]),
-            nest.map_structure(beam_search.get_state_shape_invariants, cache),
-        ])
-    scores = None
-
-  return {"outputs": decoded_ids + cache_flag, "scores": scores}
+  return {"outputs": decoded_ids + tf.cast(cache_flag, tf.int32), "scores": scores}
