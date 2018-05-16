@@ -72,10 +72,12 @@ class TransformerCache(Transformer):
       self.cache_flag = tf.Variable(0, trainable=False, name='flag', dtype=tf.int64)
 
   def calculate_mixing_weight(self, s, m):
-    return tf.einsum(
-        'jl,ikl->ikj', self.m_weight, m
-      ) + tf.einsum(
-        'jl,ikl->ikj', self.s_weight, s
+    return tf.sigmoid(
+        tf.einsum(
+          'jl,ikl->ikj', self.m_weight, m
+        ) + tf.einsum(
+          'jl,ikl->ikj', self.s_weight, s
+        )
       )
 
 
